@@ -7,21 +7,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"k8s.io/klog/v2"
-	"k8s.io/klog/v2/klogr"
 	"log"
 	"sync"
 	"time"
 
-	"github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
-	"github.com/aws/amazon-cloudwatch-agent/internal/k8sCommon/k8sutil"
-	v1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
+	"k8s.io/klog/v2/klogr"
+
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
+	"github.com/aws/amazon-cloudwatch-agent/internal/k8sCommon/k8sutil"
 )
 
 type Service struct {
@@ -132,8 +134,8 @@ func (c *epClient) Init() {
 
 	c.store = NewObjStore(transformFuncEndpoint)
 
-	lw := createEndpointListWatch(Get().ClientSet, metav1.NamespaceAll)
-	reflector := cache.NewReflector(lw, &v1.Endpoints{}, c.store, 0)
+	lw := createEndpointSlicesListWatch(Get().ClientSet, metav1.NamespaceAll)
+	reflector := cache.NewReflector(lw, &discoveryv1.EndpointSlice{}, c.store, 0)
 	klog.SetLogger(klogr.New().WithName("k8s_client_runtime").V(3))
 	go reflector.Run(c.stopChan)
 
@@ -159,19 +161,20 @@ func (c *epClient) Shutdown() {
 }
 
 func transformFuncEndpoint(obj interface{}) (interface{}, error) {
-	endpoint, ok := obj.(*v1.Endpoints)
+	endpointSlice, ok := obj.(*discoveryv1.EndpointSlice)
 	if !ok {
 		return nil, errors.New(fmt.Sprintf("input obj %v is not Endpoint type", obj))
 	}
 	info := new(endpointInfo)
-	info.name = endpoint.Name
-	info.namespace = endpoint.Namespace
+	info.name = endpointSlice.Name
+	info.namespace = endpointSlice.Namespace
 	info.podKeyList = []string{}
-	if subsets := endpoint.Subsets; subsets != nil {
-		for _, subset := range subsets {
-			if addresses := subset.Addresses; addresses != nil {
-				for _, address := range addresses {
-					if targetRef := address.TargetRef; targetRef != nil && targetRef.Kind == containerinsightscommon.TypePod {
+
+	if endpoints := endpointSlice.Endpoints; endpoints != nil {
+		for _, endpoint := range endpoints {
+			if addresses := endpoint.Addresses; addresses != nil {
+				for range addresses {
+					if targetRef := endpoint.TargetRef; targetRef != nil && targetRef.Kind == containerinsightscommon.TypePod {
 						podKey := k8sutil.CreatePodKey(targetRef.Namespace, targetRef.Name)
 						if podKey == "" {
 							log.Printf("W! Invalid pod metadata, namespace: %s, podName: %s", targetRef.Namespace, targetRef.Name)
@@ -186,14 +189,14 @@ func transformFuncEndpoint(obj interface{}) (interface{}, error) {
 	return info, nil
 }
 
-func createEndpointListWatch(client kubernetes.Interface, ns string) cache.ListerWatcher {
+func createEndpointSlicesListWatch(client kubernetes.Interface, ns string) cache.ListerWatcher {
 	ctx := context.Background()
 	return &cache.ListWatch{
 		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
-			return client.CoreV1().Endpoints(ns).List(ctx, opts)
+			return client.DiscoveryV1beta1().EndpointSlices(ns).List(ctx, opts)
 		},
 		WatchFunc: func(opts metav1.ListOptions) (watch.Interface, error) {
-			return client.CoreV1().Endpoints(ns).Watch(ctx, opts)
+			return client.DiscoveryV1beta1().EndpointSlices(ns).Watch(ctx, opts)
 		},
 	}
 }
