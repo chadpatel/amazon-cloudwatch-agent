@@ -4,20 +4,21 @@
 package aws
 
 import (
+	"context"
+	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/client"
+	"github.com/aws/aws-sdk-go/aws/endpoints"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/client"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/credentials/ec2rolecreds"
-	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
-	"github.com/aws/aws-sdk-go/aws/endpoints"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/sts"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds"
+	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	"github.com/aws/amazon-cloudwatch-agent/extension/agenthealth/handler/stats/agent"
 )
@@ -48,27 +49,58 @@ type stsCredentialProvider struct {
 	regional, partitional, fallbackProvider *stscreds.AssumeRoleProvider
 }
 
-func (s *stsCredentialProvider) IsExpired() bool {
+func (s *stsCredentialProvider) IsExpired(ctx context.Context) bool {
 	if s.fallbackProvider != nil {
-		return s.fallbackProvider.IsExpired()
+		creds, err := s.fallbackProvider.Retrieve(ctx)
+		if err != nil {
+			return true
+		}
+		return creds.Expired()
 	}
-	return s.regional.IsExpired()
+
+	creds, err := s.regional.Retrieve(ctx)
+	if err != nil {
+		return true
+	}
+	return creds.Expired()
 }
 
 type RootCredentialsProvider struct {
 	Name        func() string
-	Credentials func(*CredentialConfig) *credentials.Credentials
+	Credentials func(*CredentialConfig) aws.CredentialsProvider
 }
 
 var credentialsChain = make([]RootCredentialsProvider, 0)
 
-func getRootCredentialsFromChain(c *CredentialConfig) *credentials.Credentials {
-	for _, provider := range credentialsChain {
-		if creds := provider.Credentials(c); creds != nil {
-			return creds
+func getRootCredentialsFromChain(c *CredentialConfig) aws.CredentialsProvider {
+	var providers []aws.CredentialsProvider
+
+	// Add static credentials provider
+	if c.AccessKey != "" && c.SecretKey != "" {
+		providers = append(providers, credentials.NewStaticCredentialsProvider(c.AccessKey, c.SecretKey, c.Token))
+	}
+
+	// Add shared credentials provider
+	if c.Filename != "" || c.Profile != "" {
+		options := []func(*config.LoadOptions) error{}
+		if c.Filename != "" {
+			options = append(options, config.WithSharedConfigFiles([]string{c.Filename}))
+		}
+		if c.Profile != "" {
+			options = append(options, config.WithSharedConfigProfile(c.Profile))
+		}
+
+		cfg, err := config.LoadDefaultConfig(context.TODO(), options...)
+		if err == nil {
+			providers = append(providers, cfg.Credentials)
+		} else {
+			// Handle the error
 		}
 	}
-	return nil
+
+	// Add more credential providers as needed
+
+	return NewChainCredentialsProvider(providers...)
 }
 
 func GetDefaultCredentialsChain() []RootCredentialsProvider {
@@ -79,33 +111,35 @@ func OverwriteCredentialsChain(providers ...RootCredentialsProvider) {
 	credentialsChain = providers
 }
 
-func getSession(config *aws.Config) *session.Session {
+func getSession(awsConfig *aws.Config) *aws.Config {
 	cfgFiles := getFallbackSharedConfigFiles(backwardsCompatibleUserHomeDir)
 	log.Printf("D! Fallback shared config file(s): %v", cfgFiles)
-	ses, err := session.NewSessionWithOptions(session.Options{
-		Config:            *config,
-		SharedConfigFiles: cfgFiles,
-	})
+
+	ctx := context.Background()
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithSharedConfigFiles(cfgFiles),
+	)
 	if err != nil {
 		log.Printf("E! Failed to create credential sessions, retrying in 15s, error was '%s' \n", err)
 		time.Sleep(15 * time.Second)
-		ses, err = session.NewSessionWithOptions(session.Options{
-			Config:            *config,
-			SharedConfigFiles: cfgFiles,
-		})
+		cfg, err = config.LoadDefaultConfig(ctx,
+			config.WithSharedConfigFiles(cfgFiles),
+		)
 		if err != nil {
 			log.Printf("E! Retry failed for creating credential sessions, error was '%s' \n", err)
-			return ses
+			return awsConfig
 		}
 	}
 	log.Printf("D! Successfully created credential sessions\n")
-	cred, err := ses.Config.Credentials.Get()
+
+	cred, err := cfg.Credentials.Retrieve(ctx)
 	if err != nil {
 		log.Printf("E! Failed to get credential from session: %v", err)
 	} else {
-		log.Printf("D! Using credential %s from %s", cred.AccessKeyID, cred.ProviderName)
+		log.Printf("D! Using credential %s from %s", cred.AccessKeyID, cred.Source)
 	}
-	if cred.ProviderName == ec2rolecreds.ProviderName {
+
+	if cred.Source == "ec2rolecreds" {
 		var found []string
 		cfgFiles = getFallbackSharedConfigFiles(currentUserHomeDir)
 		for _, cfgFile := range cfgFiles {
@@ -119,7 +153,8 @@ func getSession(config *aws.Config) *session.Session {
 			agent.UsageFlags().Set(agent.FlagSharedConfigFallback)
 		}
 	}
-	return ses
+
+	return cfg.Credentials
 }
 
 func (c *CredentialConfig) rootCredentials() client.ConfigProvider {

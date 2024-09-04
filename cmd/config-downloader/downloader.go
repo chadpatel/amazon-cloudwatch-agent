@@ -1,9 +1,7 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: MIT
-
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -11,15 +9,15 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/ssm"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	//"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
-	configaws "github.com/aws/amazon-cloudwatch-agent/cfg/aws"
+	//configaws "github.com/aws/amazon-cloudwatch-agent/cfg/aws"
 	"github.com/aws/amazon-cloudwatch-agent/cfg/commonconfig"
-	"github.com/aws/amazon-cloudwatch-agent/translator/config"
-	"github.com/aws/amazon-cloudwatch-agent/translator/context"
+	configcw "github.com/aws/amazon-cloudwatch-agent/translator/config"
+	contextaws "github.com/aws/amazon-cloudwatch-agent/translator/context"
 	"github.com/aws/amazon-cloudwatch-agent/translator/util"
 	sdkutil "github.com/aws/amazon-cloudwatch-agent/translator/util"
 )
@@ -35,40 +33,51 @@ const (
 )
 
 func defaultJsonConfig(mode string) (string, error) {
-	return config.DefaultJsonConfig(config.ToValidOs(""), mode), nil
+	return configcw.DefaultJsonConfig(configcw.ToValidOs(""), mode), nil
 }
 
 func downloadFromSSM(region, parameterStoreName, mode string, credsConfig map[string]string) (string, error) {
 	fmt.Printf("Region: %v\n", region)
 	fmt.Printf("credsConfig: %v\n", credsConfig)
-	var ses *session.Session
+
 	credsMap := util.GetCredentials(mode, credsConfig)
 	profile, profileOk := credsMap[commonconfig.CredentialProfile]
 	sharedConfigFile, sharedConfigFileOk := credsMap[commonconfig.CredentialFile]
-	rootconfig := &aws.Config{
-		Region:   aws.String(region),
-		LogLevel: configaws.SDKLogLevel(),
-		Logger:   configaws.SDKLogger{},
-	}
+/* TODO:this was removed, does it need to be replaced?
+rootconfig := &aws.Config{
+	Region:   aws.String(region),
+	LogLevel: configaws.SDKLogLevel(),
+	Logger:   configaws.SDKLogger{},
+}
+ */
+
+	var awsConfig aws.Config
+	var err error
+
 	if profileOk || sharedConfigFileOk {
-		rootconfig.Credentials = credentials.NewCredentials(&credentials.SharedCredentialsProvider{
-			Filename: sharedConfigFile,
-			Profile:  profile,
-		})
+		awsConfig, err = config.LoadDefaultConfig(context.TODO(),
+			config.WithRegion(region),
+			config.WithSharedConfigProfile(profile),
+			config.WithSharedCredentialsFiles([]string{sharedConfigFile}),
+		)
+	} else {
+		awsConfig, err = config.LoadDefaultConfig(context.TODO(),
+			config.WithRegion(region),
+		)
 	}
 
-	ses, err := session.NewSession(rootconfig)
 	if err != nil {
-		fmt.Printf("Error in creating session: %v\n", err)
+		fmt.Printf("Error in loading AWS config: %v\n", err)
 		return "", err
 	}
 
-	ssmClient := ssm.New(ses)
-	input := ssm.GetParameterInput{
+	ssmClient := ssm.NewFromConfig(awsConfig)
+	input := &ssm.GetParameterInput{
 		Name:           aws.String(parameterStoreName),
 		WithDecryption: aws.Bool(true),
 	}
-	output, err := ssmClient.GetParameter(&input)
+
+	output, err := ssmClient.GetParameter(context.TODO(), input)
 	if err != nil {
 		fmt.Printf("Error in retrieving parameter store content: %v\n", err)
 		return "", err
@@ -90,13 +99,7 @@ func EscapeFilePath(filePath string) (escapedFilePath string) {
 	return
 }
 
-/**
- *		multi-config:
- *			default, append: download config to the dir and append .tmp suffix
- *			remove: remove the config from the dir
- */
 func main() {
-
 	defer func() {
 		if r := recover(); r != nil {
 			if val, ok := r.(string); ok {
@@ -147,7 +150,7 @@ func main() {
 
 	if region == "" && downloadLocation != locationDefault {
 		fmt.Println("Unable to determine aws-region.")
-		if mode == config.ModeEC2 {
+		if mode == configcw.ModeEC2 {
 			errorMessage = "E! Please check if you can access the metadata service. For example, on linux, run 'wget -q -O - http://169.254.169.254/latest/meta-data/instance-id && echo' "
 		} else {
 			errorMessage = "E! Please make sure the credentials and region set correctly on your hosts.\n" +
@@ -156,8 +159,6 @@ func main() {
 		log.Panicf(errorMessage)
 	}
 
-	// clean up output dir for tmp files before writing out new tmp file.
-	// this step cannot be in translator because it is too late at that time.
 	filepath.Walk(
 		outputDir,
 		func(path string, info os.FileInfo, err error) error {
@@ -173,7 +174,7 @@ func main() {
 					return filepath.SkipDir
 				}
 			}
-			if filepath.Ext(path) == context.TmpFileSuffix {
+			if filepath.Ext(path) == contextaws.TmpFileSuffix {
 				return os.Remove(path)
 			}
 			return nil
@@ -184,23 +185,23 @@ func main() {
 		log.Panicf("E! downloadLocation %s is malformated.", downloadLocation)
 	}
 
-	var config, outputFilePath string
+	var configContent, outputFilePath string
 	var err error
 	switch locationArray[0] {
 	case locationDefault:
 		outputFilePath = locationDefault
 		if multiConfig != "remove" {
-			config, err = defaultJsonConfig(mode)
+			configContent, err = defaultJsonConfig(mode)
 		}
 	case locationSSM:
 		outputFilePath = locationSSM + "_" + EscapeFilePath(locationArray[1])
 		if multiConfig != "remove" {
-			config, err = downloadFromSSM(region, locationArray[1], mode, cc.CredentialsMap())
+			configContent, err = downloadFromSSM(region, locationArray[1], mode, cc.CredentialsMap())
 		}
 	case locationFile:
 		outputFilePath = locationFile + "_" + EscapeFilePath(filepath.Base(locationArray[1]))
 		if multiConfig != "remove" {
-			config, err = readFromFile(locationArray[1])
+			configContent, err = readFromFile(locationArray[1])
 		}
 	default:
 		log.Panicf("E! Location type %s is not supported.", locationArray[0])
@@ -211,8 +212,8 @@ func main() {
 	}
 
 	if multiConfig != "remove" {
-		outputFilePath = filepath.Join(outputDir, outputFilePath+context.TmpFileSuffix)
-		err = os.WriteFile(outputFilePath, []byte(config), 0644)
+		outputFilePath = filepath.Join(outputDir, outputFilePath+contextaws.TmpFileSuffix)
+		err = os.WriteFile(outputFilePath, []byte(configContent), 0644)
 		if err != nil {
 			log.Panicf("E! Failed to write the json file %v: %v", outputFilePath, err)
 		} else {

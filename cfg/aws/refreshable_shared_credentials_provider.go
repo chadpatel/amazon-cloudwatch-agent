@@ -1,28 +1,34 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: MIT
-
 package aws
 
 import (
+	"context"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 )
 
-type Refreshable_shared_credentials_provider struct {
-	credentials.Expiry
-	sharedCredentialsProvider *credentials.SharedCredentialsProvider
-
-	// Retrival frequency, if the value is 15 minutes, the credentials will be retrieved every 15 minutes.
+type RefreshableSharedCredentialsProvider struct {
+	aws.CredentialsProvider
 	ExpiryWindow time.Duration
+	ExpirationProvider ExpirationProvider
 }
 
-// Retrieve reads and extracts the shared credentials from the current
-// users home directory.
-func (p *Refreshable_shared_credentials_provider) Retrieve() (credentials.Value, error) {
+type ExpirationProvider interface {
+	SetExpiration(time.Time, time.Duration)
+}
 
-	p.SetExpiration(time.Now().Add(p.ExpiryWindow), 0)
-	creds, err := p.sharedCredentialsProvider.Retrieve()
+func (p *RefreshableSharedCredentialsProvider) Retrieve(ctx context.Context) (aws.Credentials, error) {
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return aws.Credentials{}, err
+	}
 
-	return creds, err
+	creds, err := cfg.Credentials.Retrieve(ctx)
+	if err != nil {
+		return aws.Credentials{}, err
+	}
+
+	p.ExpirationProvider.SetExpiration(time.Now().Add(p.ExpiryWindow), 0)
+	return creds, nil
 }

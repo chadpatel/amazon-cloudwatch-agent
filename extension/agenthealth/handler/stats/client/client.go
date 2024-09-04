@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/amazon-contributing/opentelemetry-collector-contrib/extension/awsmiddleware"
-	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/jellydator/ttlcache/v3"
 
 	"github.com/aws/amazon-cloudwatch-agent/extension/agenthealth/handler/stats/agent"
@@ -80,20 +80,62 @@ func (csh *clientStatsHandler) HandleRequest(ctx context.Context, r *http.Reques
 	}
 	requestID := csh.getRequestID(ctx)
 	recorder := &requestRecorder{start: time.Now()}
+
+	// Check if ContentLength is already provided
 	if r.ContentLength > 0 {
 		recorder.payloadBytes = r.ContentLength
 	} else if r.Body != nil {
-		rsc, ok := r.Body.(aws.ReaderSeekerCloser)
-		if !ok {
-			rsc = aws.ReadSeekCloser(r.Body)
+		// Create a ReadSeeker from the body if it's not already one
+		rsc, err := toReadSeeker(r.Body)
+		if err != nil {
+			// Handle error if the body cannot be read
+			return
 		}
-		if length, _ := aws.SeekerLen(rsc); length > 0 {
+
+		// Try to determine the length of the request body
+		if length, err := getSeekerLength(rsc); err == nil && length > 0 {
 			recorder.payloadBytes = length
 		} else if body, err := r.GetBody(); err == nil {
+			// If the length cannot be determined, use GetBody() to copy the body to io.Discard
 			recorder.payloadBytes, _ = io.Copy(io.Discard, body)
 		}
 	}
+
+	// Store the recorder in cache with the request ID as the key
 	csh.requestCache.Set(requestID, recorder, ttlcache.DefaultTTL)
+}
+
+// Helper function to convert io.ReadCloser to io.ReadSeeker by reading it into memory
+func toReadSeeker(rc io.ReadCloser) (io.ReadSeeker, error) {
+	defer rc.Close()
+	bodyBytes, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(bodyBytes), nil
+}
+
+// Helper function to get the length of an io.ReadSeeker
+func getSeekerLength(seeker io.ReadSeeker) (int64, error) {
+	// Save the current position
+	currentPos, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+
+	// Seek to the end to find the length
+	length, err := seeker.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, err
+	}
+
+	// Return to the original position
+	_, err = seeker.Seek(currentPos, io.SeekStart)
+	if err != nil {
+		return 0, err
+	}
+
+	return length, nil
 }
 
 func (csh *clientStatsHandler) HandleResponse(ctx context.Context, r *http.Response) {

@@ -4,24 +4,54 @@
 package aws
 
 import (
+	"context"
 	"log"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 )
 
-// Hard coded strings that match actual variable names in the AWS SDK.
-// I don't expect these names to change, or their meaning to change.
+const (
+	LogDebug = aws.LogRetries | aws.LogRequest
+	LogDebugWithSigning = LogDebug | aws.LogSigning
+	LogDebugWithHTTPBody = LogDebug | aws.LogRequestWithBody | aws.LogResponseWithBody
+	LogDebugRequestRetries = LogDebug | aws.LogRetries
+	LogDebugWithEventStreamBody = LogDebug | aws.LogRequestEventMessage | aws.LogResponseEventMessage
+)
+
+// Hard coded strings that match actual variable names in the AWS SDK v2.
 // Update this map if/when AWS SDK adds more levels (unlikely).
-var stringToLevelMap map[string]aws.LogLevelType = map[string]aws.LogLevelType{
-	"LogDebug":                    aws.LogDebug,
-	"LogDebugWithSigning":         aws.LogDebugWithSigning,
-	"LogDebugWithHTTPBody":        aws.LogDebugWithHTTPBody,
-	"LogDebugWithRequestRetries":  aws.LogDebugWithRequestRetries,
-	"LogDebugWithRequestErrors":   aws.LogDebugWithRequestErrors,
-	"LogDebugWithEventStreamBody": aws.LogDebugWithEventStreamBody,
+var stringToLevelMap = map[string]aws.ClientLogMode{
+	"LogRequest":             aws.LogRequest,
+	"LogRequestWithBody":     aws.LogRequestWithBody,
+	"LogResponse":            aws.LogResponse,
+	"LogResponseWithBody":    aws.LogResponseWithBody,
+	"LogRetries":             aws.LogRetries,
+	"LogSigning":             aws.LogSigning,
+	"LogDeprecatedUsage":     aws.LogDeprecatedUsage,
+	"LogRequestEventMessage": aws.LogRequestEventMessage,
+	"LogResponseEventMessage": aws.LogResponseEventMessage,
+	// backwards compatibility with legacy AWS Go SDK v1
+	"LogDebug": LogDebug,
+	"LogDebugWithSigning": LogDebugWithSigning,
+	"LogDebugWithHTTPBody": LogDebugWithHTTPBody,
+	"LogDebugRequestRetries": LogDebugRequestRetries,
+	"LogDebugWithEventStreamBody": LogDebugWithEventStreamBody,
 }
-var sdkLogLevel aws.LogLevelType = aws.LogOff
+
+var sdkLogLevel = aws.ClientLogMode(0) // Default to no logging
+
+func setupAWSConfig() aws.Config {
+	cfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithClientLogMode(sdkLogLevel),
+	)
+	if err != nil {
+		log.Fatalf("unable to load SDK config, %v", err)
+	}
+
+	return cfg
+}
 
 // SetSDKLogLevel sets the global log level which will be used in all AWS SDK calls.
 // The levels are a bit field that is OR'd together.
@@ -29,7 +59,7 @@ var sdkLogLevel aws.LogLevelType = aws.LogOff
 // Example: "aws_sdk_log_level": "LogDebugWithSigning | LogDebugWithRequestErrors".
 // JSON string value must contain the levels seperated by "|" and optionally whitespace.
 func SetSDKLogLevel(sdkLogLevelString string) {
-	var temp aws.LogLevelType = aws.LogOff
+	var temp aws.ClientLogMode = 0 // all flags disabled
 
 	levels := strings.Split(sdkLogLevelString, "|")
 	for _, v := range levels {
@@ -43,7 +73,7 @@ func SetSDKLogLevel(sdkLogLevelString string) {
 
 // SDKLogLevel returns the single global value so it can be used in all
 // AWS SDK calls scattered throughout the Agent.
-func SDKLogLevel() *aws.LogLevelType {
+func SDKLogLevel() *aws.ClientLogMode {
 	return &sdkLogLevel
 }
 
