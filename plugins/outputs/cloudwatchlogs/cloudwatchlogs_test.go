@@ -1,12 +1,10 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: MIT
-
 package cloudwatchlogs
 
 import (
-	"sync"
 	"testing"
 
+	"github.com/aws/amazon-cloudwatch-agent/plugins/outputs/cloudwatchlogs/internal/pusher"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/influxdata/telegraf/testutil"
 	"github.com/stretchr/testify/require"
 
@@ -14,8 +12,6 @@ import (
 	"github.com/aws/amazon-cloudwatch-agent/tool/util"
 )
 
-// TestCreateDestination would create different destination for cloudwatchlogs endpoint based on the log group, log stream,
-// and log group's retention
 func TestCreateDestination(t *testing.T) {
 	testCases := map[string]struct {
 		cfgLogGroup               string
@@ -68,6 +64,9 @@ func TestCreateDestination(t *testing.T) {
 
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
+			cache, err := lru.New[pusher.Target, *cwDest](1000)
+			require.NoError(t, err)
+
 			c := &CloudWatchLogs{
 				Log:            testutil.Logger{Name: "test"},
 				LogGroupName:   "G1",
@@ -75,7 +74,7 @@ func TestCreateDestination(t *testing.T) {
 				AccessKey:      "access_key",
 				SecretKey:      "secret_key",
 				pusherStopChan: make(chan struct{}),
-				cwDests:        sync.Map{},
+				cwDests:        cache,
 			}
 			dest := c.CreateDest(testCase.cfgLogGroup, testCase.cfgLogStream, testCase.cfgLogRetention, testCase.cfgLogClass, testCase.cfgTailerSrc).(*cwDest)
 			require.Equal(t, testCase.expectedLogGroup, dest.pusher.Group)
@@ -88,11 +87,14 @@ func TestCreateDestination(t *testing.T) {
 }
 
 func TestDuplicateDestination(t *testing.T) {
+	cache, err := lru.New[pusher.Target, *cwDest](1000)
+	require.NoError(t, err)
+
 	c := &CloudWatchLogs{
 		Log:            testutil.Logger{Name: "test"},
 		AccessKey:      "access_key",
 		SecretKey:      "secret_key",
-		cwDests:        sync.Map{},
+		cwDests:        cache,
 		pusherStopChan: make(chan struct{}),
 	}
 	// Given the same log group, log stream, same retention, and logClass
@@ -101,4 +103,25 @@ func TestDuplicateDestination(t *testing.T) {
 
 	// Then the destination for cloudwatchlogs endpoint would be the same
 	require.Equal(t, d1, d2)
+}
+
+func TestLRUEviction(t *testing.T) {
+	cache, err := lru.New[pusher.Target, *cwDest](2) // Small size for testing
+	require.NoError(t, err)
+
+	c := &CloudWatchLogs{
+		Log:            testutil.Logger{Name: "test"},
+		AccessKey:      "access_key",
+		SecretKey:      "secret_key",
+		cwDests:        cache,
+		pusherStopChan: make(chan struct{}),
+	}
+
+	// Create 3 destinations
+	c.CreateDest("group1", "stream1", -1, "", nil)
+	c.CreateDest("group2", "stream2", -1, "", nil)
+	c.CreateDest("group3", "stream3", -1, "", nil)
+
+	// Verify that the cache maintains its maximum size of 2
+	require.Equal(t, 2, c.cwDests.Len(), "Cache should maintain max size of 2")
 }

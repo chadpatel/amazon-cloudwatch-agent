@@ -13,6 +13,7 @@ import (
 
 	"github.com/amazon-contributing/opentelemetry-collector-contrib/extension/awsmiddleware"
 	"github.com/aws/aws-sdk-go/aws"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/outputs"
 	"go.uber.org/zap"
@@ -76,7 +77,7 @@ type CloudWatchLogs struct {
 
 	pusherStopChan  chan struct{}
 	pusherWaitGroup sync.WaitGroup
-	cwDests         sync.Map
+	cwDests         *lru.Cache[pusher.Target, *cwDest]
 	workerPool      pusher.WorkerPool
 	targetManager   pusher.TargetManager
 	once            sync.Once
@@ -91,12 +92,12 @@ func (c *CloudWatchLogs) Close() error {
 	close(c.pusherStopChan)
 	c.pusherWaitGroup.Wait()
 
-	c.cwDests.Range(func(_, value interface{}) bool {
-		if d, ok := value.(*cwDest); ok {
+	// Stop all destinations
+	for _, key := range c.cwDests.Keys() {
+		if d, ok := c.cwDests.Get(key); ok && d != nil {
 			d.Stop()
 		}
-		return true
-	})
+	}
 
 	if c.workerPool != nil {
 		c.workerPool.Stop()
@@ -133,8 +134,9 @@ func (c *CloudWatchLogs) CreateDest(group, stream string, retention int, logGrou
 }
 
 func (c *CloudWatchLogs) getDest(t pusher.Target, logSrc logs.LogSrc) *cwDest {
-	if cwd, ok := c.cwDests.Load(t); ok {
-		return cwd.(*cwDest)
+	// Try to get from cache first
+	if cwd, ok := c.cwDests.Get(t); ok {
+		return cwd
 	}
 
 	logThrottleRetryer := retryer.NewLogThrottleRetryer(c.Log)
@@ -144,15 +146,18 @@ func (c *CloudWatchLogs) getDest(t pusher.Target, logSrc logs.LogSrc) *cwDest {
 	if containerInsightsRegexp.MatchString(t.Group) {
 		useragent.Get().SetContainerInsightsFlag()
 	}
+
 	c.once.Do(func() {
 		if c.Concurrency > 0 {
 			c.workerPool = pusher.NewWorkerPool(c.Concurrency)
 		}
 		c.targetManager = pusher.NewTargetManager(c.Log, client)
 	})
+
 	p := pusher.NewPusher(c.Log, t, client, c.targetManager, logSrc, c.workerPool, c.ForceFlushInterval.Duration, maxRetryTimeout, c.pusherStopChan, &c.pusherWaitGroup)
 	cwd := &cwDest{pusher: p, retryer: logThrottleRetryer}
-	c.cwDests.Store(t, cwd)
+
+	c.cwDests.Add(t, cwd)
 	return cwd
 }
 
@@ -401,10 +406,15 @@ func (c *CloudWatchLogs) SampleConfig() string {
 
 func init() {
 	outputs.Add("cloudwatchlogs", func() telegraf.Output {
+		cache, err := lru.New[pusher.Target, *cwDest](1000) // Set max size to 1000
+		if err != nil {
+			// TODO: Handle error appropriately
+			return nil
+		}
 		return &CloudWatchLogs{
 			ForceFlushInterval: internal.Duration{Duration: defaultFlushTimeout},
 			pusherStopChan:     make(chan struct{}),
-			cwDests:            sync.Map{},
+			cwDests:            cache,
 			middleware: agenthealth.NewAgentHealth(
 				zap.NewNop(),
 				&agenthealth.Config{
