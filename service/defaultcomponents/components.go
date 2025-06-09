@@ -66,6 +66,7 @@ import (
 	"github.com/aws/amazon-cloudwatch-agent/plugins/processors/ec2tagger"
 	"github.com/aws/amazon-cloudwatch-agent/plugins/processors/gpuattributes"
 	"github.com/aws/amazon-cloudwatch-agent/plugins/processors/kueueattributes"
+	"github.com/aws/amazon-cloudwatch-agent/plugins/processors/prometheusadapter"
 	"github.com/aws/amazon-cloudwatch-agent/processor/rollupprocessor"
 	"github.com/aws/amazon-cloudwatch-agent/receiver/awsnvmereceiver"
 	"github.com/aws/amazon-cloudwatch-agent/receiver/systemmetricsreceiver"
@@ -116,6 +117,7 @@ func Factories() (otelcol.Factories, error) {
 		metricsgenerationprocessor.NewFactory(),
 		metricstransformprocessor.NewFactory(),
 		probabilisticsamplerprocessor.NewFactory(),
+		prometheusadapter.NewFactory(),
 		resourceprocessor.NewFactory(),
 		resourcedetectionprocessor.NewFactory(),
 		rollupprocessor.NewFactory(),
