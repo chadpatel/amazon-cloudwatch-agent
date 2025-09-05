@@ -1118,6 +1118,38 @@ func replaceTokens(base []byte, tokenReplacements ...map[string]string) string {
 	return content
 }
 
+func TestPrometheusCustomerRelabelConfigs(t *testing.T) {
+	resetContext(t)
+	context.CurrentContext().SetMode(config.ModeEC2)
+	ecsutil.GetECSUtilSingleton().Region = "us-west-2"
+	ecsutil.GetECSUtilSingleton().Cluster = "myTestCluster"
+	testutil.SetPrometheusRemoteWriteTestingEnv(t)
+	t.Setenv(config.HOST_NAME, "host_name_from_env")
+	temp := t.TempDir()
+	prometheusConfigFileName := filepath.Join(temp, "prometheus.yaml")
+	expectedEnvVars := map[string]string{}
+	tokenReplacements := map[string]string{
+		prometheusFileNameToken: strings.ReplaceAll(prometheusConfigFileName, "\\", "\\\\"),
+	}
+
+	testPrometheusConfig := `global:
+  scrape_interval: 1m
+  scrape_timeout: 10s
+scrape_configs:
+  - job_name: test
+    file_sd_configs:
+      - files: ['/tmp/cwagent_ecs_auto_sd.yaml']
+    relabel_configs:
+      - action: replace
+        source_labels: [StartedBy]
+        target_label: CustomStartedBy`
+
+	err := os.WriteFile(prometheusConfigFileName, []byte(testPrometheusConfig), os.ModePerm)
+	require.NoError(t, err)
+
+	checkTranslation(t, "prometheus_customer_relabel_config_linux", "linux", expectedEnvVars, "", tokenReplacements)
+}
+
 func checkIfEnvTranslateSucceed(t *testing.T, jsonStr string, targetOs string, expectedEnvVars map[string]string) {
 	var input map[string]interface{}
 	translator.SetTargetPlatform(targetOs)
