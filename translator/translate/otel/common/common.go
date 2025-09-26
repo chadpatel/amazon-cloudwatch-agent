@@ -131,7 +131,8 @@ const (
 )
 
 const (
-	DiskIOPrefix = "diskio_"
+	DiskIOPrefix   = "diskio_"
+	ClusterNameKey = "cluster_name"
 )
 
 var (
@@ -495,7 +496,7 @@ func KueueContainerInsightsEnabled(conf *confmap.Conf) bool {
 }
 
 func GetClusterName(conf *confmap.Conf) string {
-	val, ok := GetString(conf, ConfigKey(LogsKey, MetricsCollectedKey, KubernetesKey, "cluster_name"))
+	val, ok := GetString(conf, ConfigKey(LogsKey, MetricsCollectedKey, KubernetesKey, ClusterNameKey))
 	if ok && val != "" {
 		return val
 	}
@@ -505,5 +506,10 @@ func GetClusterName(conf *confmap.Conf) string {
 		return envVarClusterName
 	}
 
-	return util.GetClusterNameFromEc2Tagger()
+	clusterName := util.GetClusterNameFromEc2Tagger()
+	if clusterName == "" {
+		clusterName = util.GetECSClusterName(ClusterNameKey, make(map[string]interface{}))
+	}
+
+	return clusterName
 }
