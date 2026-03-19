@@ -610,7 +610,10 @@ func TestPrometheusAndKubernetesConfig(t *testing.T) {
 	// Write the modified prometheus config to temp prometheus config file
 	err := os.WriteFile(prometheusConfigFileName, []byte(k8sPrometheusConfig), os.ModePerm)
 	require.NoError(t, err)
-	checkTranslation(t, "prometheus_and_kubernetes_config", "linux", expectedEnvVars, "")
+	tokenReplacements := map[string]string{
+		prometheusFileNameToken: strings.ReplaceAll(prometheusConfigFileName, "\\", "\\\\"),
+	}
+	checkTranslation(t, "prometheus_and_kubernetes_config", "linux", expectedEnvVars, "", tokenReplacements)
 }
 
 func TestPrometheusEcsSdConfig(t *testing.T) {
@@ -629,14 +632,13 @@ func TestPrometheusEcsSdConfig(t *testing.T) {
 		ecsSdFileNameToken:      strings.ReplaceAll(ecsSdFileName, "\\", "\\\\"),
 	}
 	// Load prometheus config and replace ecs sd results file name token with temp file name
-	testPrometheusConfig := strings.ReplaceAll(prometheusConfig, "{"+ecsSdFileNameToken+"}", ecsSdFileName)
+	testPrometheusConfig := strings.ReplaceAll(ecsPrometheusConfig, "{"+ecsSdFileNameToken+"}", ecsSdFileName)
 	// Write the modified prometheus config to temp prometheus config file
 	err := os.WriteFile(prometheusConfigFileName, []byte(testPrometheusConfig), os.ModePerm)
 	require.NoError(t, err)
 	// In the following checks, we first load the json and replace tokens with the temp files
 	// Additionally, before comparing with actual, we again replace tokens with temp files in the expected toml & yaml
 	checkTranslation(t, "prometheus_ecs_sd_config_linux", "linux", expectedEnvVars, "", tokenReplacements)
-}
 }
 
 func TestBasicConfig(t *testing.T) {

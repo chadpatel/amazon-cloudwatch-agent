@@ -443,7 +443,9 @@ func (c *CloudWatch) BuildMetricDatum(metric *aggregationDatum) (cloudwatch.Enti
 	var datums []*cloudwatch.MetricDatum
 	dimensionsList := c.ProcessRollup(metric.Dimensions)
 
-	if metric.distribution != nil {
+	if metric.histogram != nil {
+		datums = c.buildMetricDatumHist(metric, dimensionsList)
+	} else if metric.distribution != nil {
 		datums = c.buildMetricDatumDist(metric, dimensionsList)
 	} else {
 		for index, dimensions := range dimensionsList {
@@ -536,6 +538,57 @@ func (c *CloudWatch) buildMetricDatumDist(metric *aggregationDatum, dimensionsLi
 				StorageResolution: metric.StorageResolution,
 				Values:            aws.Float64Slice(values),
 				Counts:            aws.Float64Slice(counts),
+				StatisticValues:   &s,
+			}
+			datums = append(datums, datum)
+		}
+	}
+	return datums
+}
+
+func (c *CloudWatch) buildMetricDatumHist(metric *aggregationDatum, dimensionsList [][]*cloudwatch.Dimension) []*cloudwatch.MetricDatum {
+	var datums []*cloudwatch.MetricDatum
+
+	cwhist := ConvertOTelToCloudWatch(*metric.histogram)
+	values, counts := cwhist.ValuesAndCounts()
+
+	if len(values) == 0 {
+		log.Printf("E! histogram metric has no values, %s", *metric.MetricName)
+		return datums
+	}
+
+	maxPerDatum := c.config.MaxValuesPerDatum
+	for batchStart := 0; batchStart < len(values); batchStart += maxPerDatum {
+		batchEnd := batchStart + maxPerDatum
+		if batchEnd > len(values) {
+			batchEnd = len(values)
+		}
+		batchValues := values[batchStart:batchEnd]
+		batchCounts := counts[batchStart:batchEnd]
+
+		s := cloudwatch.StatisticSet{}
+		s.SetMaximum(cwhist.Maximum())
+		s.SetMinimum(cwhist.Minimum())
+		s.SetSampleCount(cwhist.SampleCount())
+		// Only assign Sum on the first batch to avoid double-counting.
+		if batchStart == 0 {
+			s.SetSum(cwhist.Sum())
+		} else {
+			s.SetSum(0)
+		}
+
+		for index, dimensions := range dimensionsList {
+			if index == 0 && c.IsDropping(*metric.MetricName) {
+				continue
+			}
+			datum := &cloudwatch.MetricDatum{
+				MetricName:        metric.MetricName,
+				Dimensions:        dimensions,
+				Timestamp:         metric.Timestamp,
+				Unit:              metric.Unit,
+				StorageResolution: metric.StorageResolution,
+				Values:            aws.Float64Slice(batchValues),
+				Counts:            aws.Float64Slice(batchCounts),
 				StatisticValues:   &s,
 			}
 			datums = append(datums, datum)

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/collector/pdata/pmetric"
+
 	"github.com/aws/amazon-cloudwatch-agent/metric/distribution"
 	"github.com/aws/amazon-cloudwatch-agent/sdk/service/cloudwatch"
 )
@@ -28,6 +30,7 @@ type aggregationDatum struct {
 	cloudwatch.MetricDatum
 	aggregationInterval time.Duration
 	distribution        distribution.Distribution
+	histogram           *pmetric.HistogramDataPoint
 	entity              cloudwatch.Entity
 }
 
@@ -140,7 +143,9 @@ func (durationAgg *durationAggregator) aggregating() {
 			if !ok {
 				// First entry. Initialize it.
 				durationAgg.metricMap[metricMapKey] = m
-				if m.distribution == nil {
+				if m.histogram != nil {
+					// Histogram: store directly, no distribution needed.
+				} else if m.distribution == nil {
 					// Assume function pointer is always valid.
 					m.distribution = distribution.NewClassicDistribution()
 					err := m.distribution.AddEntryWithUnit(*m.Value, 1, *m.Unit)
@@ -155,7 +160,9 @@ func (durationAgg *durationAggregator) aggregating() {
 				// Else the first entry has a distribution, so do nothing.
 			} else {
 				// Update an existing entry.
-				if m.distribution != nil {
+				if m.histogram != nil {
+					AddHistograms(*aggregatedMetric.histogram, *m.histogram)
+				} else if m.distribution != nil {
 					aggregatedMetric.distribution.AddDistribution(m.distribution)
 				} else {
 					err := aggregatedMetric.distribution.AddEntryWithUnit(*m.Value, 1, *m.Unit)

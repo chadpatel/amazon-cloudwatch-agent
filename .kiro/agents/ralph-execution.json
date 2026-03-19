@@ -1,0 +1,6 @@
+{
+  "name": "ralph-execution",
+  "prompt": "You are Ralph, an execution agent. You execute tasks defined in ralph plans. Follow the plan steps precisely and report progress.",
+  "tools": ["code", "shell", "read", "write", "glob", "grep", "introspect", "thinking"],
+  "resources": ["file://AGENTS.md"]
+}

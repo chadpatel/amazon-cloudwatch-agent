@@ -25,6 +25,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.uber.org/zap"
 
 	"github.com/aws/amazon-cloudwatch-agent/extension/agenthealth/handler/useragent"
@@ -709,6 +711,153 @@ func TestWriteToCloudWatchEntity(t *testing.T) {
 	})
 
 	assert.Equal(t, expectedPMDInput, input)
+}
+
+func makeHistogramDatum(t *testing.T) *aggregationDatum {
+	t.Helper()
+	dp := pmetric.NewHistogramDataPoint()
+	dp.ExplicitBounds().Append(5)
+	dp.ExplicitBounds().Append(10)
+	dp.BucketCounts().Append(600)
+	dp.BucketCounts().Append(10)
+	dp.BucketCounts().Append(387)
+	dp.SetMin(3.0)
+	dp.SetMax(37.0)
+	dp.SetSum(4095.0)
+	dp.SetCount(997)
+	dp.SetTimestamp(pcommon.NewTimestampFromTime(time.Now()))
+	return &aggregationDatum{
+		MetricDatum: cloudwatch.MetricDatum{
+			MetricName: aws.String("test_histogram"),
+			Dimensions: []*cloudwatch.Dimension{
+				{Name: aws.String("d1"), Value: aws.String("v1")},
+			},
+			Timestamp: aws.Time(time.Now()),
+		},
+		histogram: &dp,
+	}
+}
+
+func TestBuildMetricDatumHist(t *testing.T) {
+	svc := new(mockCloudWatchClient)
+	cw := newCloudWatchClient(svc, time.Second)
+
+	ad := makeHistogramDatum(t)
+	_, datums := cw.BuildMetricDatum(ad)
+
+	require.NotEmpty(t, datums)
+	d := datums[0]
+	assert.Equal(t, "test_histogram", *d.MetricName)
+	assert.NotNil(t, d.StatisticValues)
+	assert.Equal(t, 37.0, *d.StatisticValues.Maximum)
+	assert.Equal(t, 3.0, *d.StatisticValues.Minimum)
+	assert.Equal(t, 4095.0, *d.StatisticValues.Sum)
+	assert.Equal(t, 997.0, *d.StatisticValues.SampleCount)
+	assert.NotEmpty(t, d.Values)
+	assert.NotEmpty(t, d.Counts)
+	assert.Equal(t, len(d.Values), len(d.Counts))
+	// Total counts across all datums should equal 997.
+	totalCount := 0.0
+	for _, datum := range datums {
+		for _, c := range datum.Counts {
+			totalCount += *c
+		}
+	}
+	assert.Equal(t, 997.0, totalCount)
+}
+
+func TestBuildMetricDatumHist_SplitLargeHistogram(t *testing.T) {
+	svc := new(mockCloudWatchClient)
+	cw := newCloudWatchClient(svc, time.Second)
+	// Use a small MaxValuesPerDatum to force splitting.
+	cw.config.MaxValuesPerDatum = 5
+
+	ad := makeHistogramDatum(t)
+	_, datums := cw.BuildMetricDatum(ad)
+
+	require.Greater(t, len(datums), 1, "expected histogram to be split into multiple datums")
+	// Sum should only be on the first batch.
+	assert.Equal(t, 4095.0, *datums[0].StatisticValues.Sum)
+	for i := 1; i < len(datums); i++ {
+		assert.Equal(t, 0.0, *datums[i].StatisticValues.Sum)
+	}
+	// Each datum should have at most MaxValuesPerDatum values.
+	for _, d := range datums {
+		assert.LessOrEqual(t, len(d.Values), 5)
+	}
+}
+
+func TestBuildMetricDatumHist_WithRollup(t *testing.T) {
+	svc := new(mockCloudWatchClient)
+	cw := newCloudWatchClient(svc, time.Second)
+	cw.config.RollupDimensions = [][]string{{}}
+
+	ad := makeHistogramDatum(t)
+	_, datums := cw.BuildMetricDatum(ad)
+
+	// With rollup to [] (zero dimensions), we expect datums for both the original
+	// dimension set and the empty dimension set.
+	require.GreaterOrEqual(t, len(datums), 2)
+	hasFull := false
+	hasEmpty := false
+	for _, d := range datums {
+		if len(d.Dimensions) == 1 {
+			hasFull = true
+		}
+		if len(d.Dimensions) == 0 {
+			hasEmpty = true
+		}
+	}
+	assert.True(t, hasFull, "expected datum with original dimensions")
+	assert.True(t, hasEmpty, "expected datum with rolled-up empty dimensions")
+}
+
+func TestBuildMetricDatum_BackwardCompat_Distribution(t *testing.T) {
+	svc := new(mockCloudWatchClient)
+	cw := newCloudWatchClient(svc, time.Second)
+
+	dist := distribution.NewClassicDistribution()
+	require.NoError(t, dist.AddEntry(10.0, 1))
+	require.NoError(t, dist.AddEntry(20.0, 1))
+
+	ad := &aggregationDatum{
+		MetricDatum: cloudwatch.MetricDatum{
+			MetricName: aws.String("test_dist"),
+			Dimensions: []*cloudwatch.Dimension{},
+			Timestamp:  aws.Time(time.Now()),
+		},
+		distribution: dist,
+	}
+	_, datums := cw.BuildMetricDatum(ad)
+
+	require.NotEmpty(t, datums)
+	d := datums[0]
+	assert.NotNil(t, d.StatisticValues)
+	assert.NotEmpty(t, d.Values)
+	assert.NotEmpty(t, d.Counts)
+	assert.Nil(t, d.Value, "distribution datum should not have scalar Value")
+}
+
+func TestBuildMetricDatum_BackwardCompat_Scalar(t *testing.T) {
+	svc := new(mockCloudWatchClient)
+	cw := newCloudWatchClient(svc, time.Second)
+
+	ad := &aggregationDatum{
+		MetricDatum: cloudwatch.MetricDatum{
+			MetricName: aws.String("test_scalar"),
+			Dimensions: []*cloudwatch.Dimension{},
+			Timestamp:  aws.Time(time.Now()),
+			Value:      aws.Float64(42.0),
+		},
+	}
+	_, datums := cw.BuildMetricDatum(ad)
+
+	require.Len(t, datums, 1)
+	d := datums[0]
+	assert.Equal(t, 42.0, *d.Value)
+	assert.Nil(t, d.StatisticValues, "scalar datum should not have StatisticValues")
+	assert.Nil(t, d.Values, "scalar datum should not have Values")
+	assert.Nil(t, d.Counts, "scalar datum should not have Counts")
 }
 
 func TestUserAgentFeatureFlags(t *testing.T) {

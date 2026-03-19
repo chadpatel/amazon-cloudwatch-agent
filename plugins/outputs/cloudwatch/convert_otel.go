@@ -13,7 +13,6 @@ import (
 	"go.opentelemetry.io/collector/pdata/pmetric"
 
 	cloudwatchutil "github.com/aws/amazon-cloudwatch-agent/internal/cloudwatch"
-	"github.com/aws/amazon-cloudwatch-agent/metric/distribution"
 	"github.com/aws/amazon-cloudwatch-agent/metric/distribution/exph"
 	"github.com/aws/amazon-cloudwatch-agent/plugins/processors/awsentity/entityattributes"
 	"github.com/aws/amazon-cloudwatch-agent/sdk/service/cloudwatch"
@@ -111,7 +110,8 @@ func convertOtelNumberDataPoints(
 }
 
 // convertOtelHistogramDataPoints converts each datapoint in the given slice to
-// Distribution.
+// an aggregationDatum with the histogram field set for later conversion via
+// ConvertOTelToCloudWatch.
 func convertOtelHistogramDataPoints(
 	dataPoints pmetric.HistogramDataPointSlice,
 	name string,
@@ -122,6 +122,10 @@ func convertOtelHistogramDataPoints(
 	datums := make([]*aggregationDatum, 0, dataPoints.Len())
 	for i := 0; i < dataPoints.Len(); i++ {
 		dp := dataPoints.At(i)
+		if err := CheckValidity(dp); err != nil {
+			log.Printf("W! dropping invalid histogram datapoint for metric %s: %v", name, err)
+			continue
+		}
 		attrs := dp.Attributes()
 		storageResolution := checkHighResolution(&attrs)
 		aggregationInterval := getAggregationInterval(&attrs)
@@ -135,12 +139,9 @@ func convertOtelHistogramDataPoints(
 				StorageResolution: aws.Int64(storageResolution),
 			},
 			aggregationInterval: aggregationInterval,
+			histogram:           &dp,
 			entity:              entity,
 		}
-		// Assume function pointer is valid.
-		classic := distribution.NewClassicDistribution()
-		classic.ConvertFromOtel(dp, unit)
-		ad.distribution = classic
 		datums = append(datums, &ad)
 	}
 	return datums

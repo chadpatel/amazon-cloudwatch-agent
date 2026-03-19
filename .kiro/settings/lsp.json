@@ -1,0 +1,14 @@
+{
+  "languages": {
+    "go": {
+      "name": "gopls",
+      "command": "gopls",
+      "args": ["serve"],
+      "file_extensions": ["go"],
+      "project_patterns": ["go.mod"],
+      "exclude_patterns": ["**/vendor/**"],
+      "multi_workspace": false,
+      "request_timeout_secs": 60
+    }
+  }
+}

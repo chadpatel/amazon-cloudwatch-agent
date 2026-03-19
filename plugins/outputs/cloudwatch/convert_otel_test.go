@@ -15,8 +15,6 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 
-	"github.com/aws/amazon-cloudwatch-agent/metric/distribution"
-	"github.com/aws/amazon-cloudwatch-agent/metric/distribution/regular"
 	"github.com/aws/amazon-cloudwatch-agent/plugins/processors/awsentity/entityattributes"
 	"github.com/aws/amazon-cloudwatch-agent/sdk/service/cloudwatch"
 )
@@ -114,15 +112,16 @@ func createTestHistogram(
 		m.SetEmptyHistogram()
 		for j := 0; j < numDatapoints; j++ {
 			dp := m.Histogram().DataPoints().AppendEmpty()
-			// Make the values match the count so it is easy to verify.
-			dp.ExplicitBounds().Append(float64(1 + i))
-			dp.ExplicitBounds().Append(float64(2 + 2*i))
-			dp.BucketCounts().Append(uint64(1 + i))
-			dp.BucketCounts().Append(uint64(2 + 2*i))
+			// Valid OTel histogram: len(BucketCounts) == len(ExplicitBounds) + 1
+			dp.ExplicitBounds().Append(5)
+			dp.ExplicitBounds().Append(10)
+			dp.BucketCounts().Append(600)
+			dp.BucketCounts().Append(10)
+			dp.BucketCounts().Append(387)
 			dp.SetMax(histogramMax)
 			dp.SetMin(histogramMin)
 			dp.SetSum(histogramSum)
-			dp.SetCount(histogramCount)
+			dp.SetCount(997) // 600 + 10 + 387
 			dp.SetStartTimestamp(pcommon.NewTimestampFromTime(time.Now()))
 			dp.SetTimestamp(pcommon.NewTimestampFromTime(time.Now()))
 			addDimensions(dp.Attributes(), numDimensions)
@@ -183,19 +182,18 @@ func checkDatum(
 ) {
 	assert.True(t, strings.HasPrefix(*d.MetricName, namePrefix))
 	assert.Equal(t, unit, *d.Unit)
-	if d.distribution != nil {
+	if d.histogram != nil {
+		// Verify histogram data point fields.
+		assert.Equal(t, histogramMax, d.histogram.Max())
+		assert.Equal(t, histogramMin, d.histogram.Min())
+		assert.Equal(t, histogramSum, d.histogram.Sum())
+		assert.Equal(t, uint64(997), d.histogram.Count())
+	} else if d.distribution != nil {
 		// Verify distribution
 		assert.Equal(t, float64(histogramMax), d.distribution.Maximum())
 		assert.Equal(t, float64(histogramMin), d.distribution.Minimum())
 		assert.Equal(t, float64(histogramSum), d.distribution.Sum())
 		assert.Equal(t, float64(histogramCount), d.distribution.SampleCount())
-		values, counts := d.distribution.ValuesAndCounts()
-		assert.Equal(t, 2, len(values))
-		assert.Equal(t, 2, len(counts))
-		// Expect values and counts to match.
-		// Refer to how createTestHistogram() sets them.
-		assert.Equal(t, values[0], counts[0])
-		assert.Equal(t, values[1], counts[1])
 	} else {
 		// Verify single metric value.
 		assert.Equal(t, metricValue, *d.Value)
@@ -226,12 +224,6 @@ func TestConvertOtelMetrics_NoDimensions(t *testing.T) {
 
 func TestConvertOtelMetrics_Histogram(t *testing.T) {
 	for i := 0; i < 5; i++ {
-		if i%2 == 0 {
-			//distribution.NewDistribution = seh1.NewSEH1Distribution
-			distribution.NewClassicDistribution = regular.NewRegularDistribution
-		} else {
-			distribution.NewClassicDistribution = regular.NewRegularDistribution
-		}
 		metrics := createTestHistogram(i, i, 0, "Bytes")
 		datums := ConvertOtelMetrics(metrics)
 		// Expect nummetrics * numDatapointsPerMetric
@@ -243,6 +235,88 @@ func TestConvertOtelMetrics_Histogram(t *testing.T) {
 			checkDatum(t, d, "Bytes", i)
 		}
 	}
+}
+
+func TestConvertOtelHistogramDataPoints_Valid(t *testing.T) {
+	// 3-bucket histogram with bounds [5,10] and counts [600,10,387].
+	dp := pmetric.NewHistogramDataPointSlice()
+	p := dp.AppendEmpty()
+	p.ExplicitBounds().Append(5)
+	p.ExplicitBounds().Append(10)
+	p.BucketCounts().Append(600)
+	p.BucketCounts().Append(10)
+	p.BucketCounts().Append(387)
+	p.SetMin(histogramMin)
+	p.SetMax(histogramMax)
+	p.SetSum(histogramSum)
+	p.SetCount(997)
+	p.SetTimestamp(pcommon.NewTimestampFromTime(time.Now()))
+
+	datums := convertOtelHistogramDataPoints(dp, "test_hist", "Bytes", 1, cloudwatch.Entity{})
+	assert.Equal(t, 1, len(datums))
+	d := datums[0]
+	assert.NotNil(t, d.histogram, "histogram field should be set")
+	assert.Nil(t, d.distribution, "distribution field should not be set")
+	assert.Equal(t, "test_hist", *d.MetricName)
+	assert.Equal(t, "Bytes", *d.Unit)
+	assert.Equal(t, uint64(997), d.histogram.Count())
+	assert.Equal(t, histogramSum, d.histogram.Sum())
+}
+
+func TestConvertOtelHistogramDataPoints_Invalid(t *testing.T) {
+	// Mismatched bounds/counts: 2 bounds but only 2 counts (should be 3).
+	dp := pmetric.NewHistogramDataPointSlice()
+	p := dp.AppendEmpty()
+	p.ExplicitBounds().Append(5)
+	p.ExplicitBounds().Append(10)
+	p.BucketCounts().Append(600)
+	p.BucketCounts().Append(10)
+	p.SetTimestamp(pcommon.NewTimestampFromTime(time.Now()))
+
+	datums := convertOtelHistogramDataPoints(dp, "bad_hist", "Bytes", 1, cloudwatch.Entity{})
+	assert.Equal(t, 0, len(datums), "invalid histogram should be dropped")
+}
+
+func TestConvertOtelMetric_GaugeUnchanged(t *testing.T) {
+	metrics := createTestMetrics(2, 1, 2, "Bytes")
+	datums := ConvertOtelMetrics(metrics)
+	// 2 metrics × 1 datapoint each = 2 datums. Even-indexed metrics are gauges.
+	assert.Equal(t, 2, len(datums))
+	for _, d := range datums {
+		assert.Nil(t, d.histogram, "gauge should not have histogram")
+		assert.Nil(t, d.distribution, "gauge should not have distribution")
+		assert.NotNil(t, d.Value)
+		assert.Equal(t, metricValue, *d.Value)
+		assert.Equal(t, "Bytes", *d.Unit)
+		assert.Equal(t, 2, len(d.Dimensions))
+	}
+}
+
+func TestConvertOtelMetric_SumUnchanged(t *testing.T) {
+	// createTestMetrics alternates gauge/sum. Use 3 metrics to get at least one sum (index 1).
+	metrics := createTestMetrics(3, 1, 1, "s")
+	datums := ConvertOtelMetrics(metrics)
+	assert.Equal(t, 3, len(datums))
+	// Index 1 is a sum metric.
+	d := datums[1]
+	assert.Nil(t, d.histogram, "sum should not have histogram")
+	assert.Nil(t, d.distribution, "sum should not have distribution")
+	assert.NotNil(t, d.Value)
+	assert.Equal(t, metricValue, *d.Value)
+	assert.Equal(t, "Seconds", *d.Unit)
+}
+
+func TestConvertOtelMetric_ExponentialHistogramUnchanged(t *testing.T) {
+	metrics := createTestExponentialHistogram(1, 1, 1, "Bytes")
+	datums := ConvertOtelMetrics(metrics)
+	assert.Equal(t, 1, len(datums))
+	d := datums[0]
+	assert.Nil(t, d.histogram, "exponential histogram should not use histogram field")
+	assert.NotNil(t, d.distribution, "exponential histogram should use distribution (exph)")
+	assert.Equal(t, float64(histogramMax), d.distribution.Maximum())
+	assert.Equal(t, float64(histogramMin), d.distribution.Minimum())
+	assert.Equal(t, float64(histogramSum), d.distribution.Sum())
+	assert.Equal(t, float64(histogramCount), d.distribution.SampleCount())
 }
 
 func TestConvertOtelMetrics_ExponentialHistogram(t *testing.T) {

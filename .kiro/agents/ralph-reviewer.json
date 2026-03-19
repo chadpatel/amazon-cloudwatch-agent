@@ -1,0 +1,6 @@
+{
+  "name": "ralph-reviewer",
+  "tools": ["read"],
+  "allowedTools": ["read"],
+  "resources": ["file://docs/ralph.md", "file://AGENTS.md"]
+}

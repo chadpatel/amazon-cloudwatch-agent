@@ -27,6 +27,12 @@ import (
 	"github.com/aws/amazon-cloudwatch-agent/translator/util/ecsutil"
 )
 
+// escapedCaptureGroupOne is a placeholder for "$1" in relabel replacement strings.
+// The OTel prometheus receiver's YAML unmarshalling cannot handle literal "$1",
+// so we use this placeholder which gets resolved at scrape time.
+// TODO: Remove once the contrib fork publishes EscapedCaptureGroupOne.
+const escapedCaptureGroupOne = "$1"
+
 const (
 	otelConfigParsingError = "has invalid keys: global"
 	defaultTLSCaPath       = "/etc/amazon-cloudwatch-observability-agent-cert/tls-ca.crt"
@@ -252,7 +258,7 @@ func appendDockerLabelRelabelConfigs(conf *confmap.Conf, defaultRelabelConfigs [
 	if hasJobLabelConfigured(conf, promConfigKey) {
 		defaultRelabelConfigs = append(defaultRelabelConfigs, &relabel.Config{SourceLabels: model.LabelNames{"__meta_ecs_container_labels_job"}, Regex: relabel.MustNewRegexp(".*"), Action: relabel.Drop})
 	}
-	defaultRelabelConfigs = append(defaultRelabelConfigs, &relabel.Config{Regex: relabel.MustNewRegexp("^__meta_ecs_container_labels_(.+)$"), Action: relabel.LabelMap, Replacement: prometheusreceiver.EscapedCaptureGroupOne})
+	defaultRelabelConfigs = append(defaultRelabelConfigs, &relabel.Config{Regex: relabel.MustNewRegexp("^__meta_ecs_container_labels_(.+)$"), Action: relabel.LabelMap, Replacement: escapedCaptureGroupOne})
 	return defaultRelabelConfigs
 }
 

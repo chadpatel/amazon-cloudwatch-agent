@@ -725,10 +725,10 @@ func validateRelabelFields(t *testing.T, scrapeConfigWithFileSD *config.ScrapeCo
 		assert.Equal(t, relabel.Drop, scrapeConfigWithFileSD.RelabelConfigs[12].Action)
 		assert.Equal(t, model.LabelNames{"__meta_ecs_container_labels_job"}, scrapeConfigWithFileSD.RelabelConfigs[12].SourceLabels)
 		assert.Equal(t, relabel.LabelMap, scrapeConfigWithFileSD.RelabelConfigs[13].Action)
-		assert.Equal(t, prometheusreceiver.EscapedCaptureGroupOne, scrapeConfigWithFileSD.RelabelConfigs[13].Replacement)
+		assert.Equal(t, escapedCaptureGroupOne, scrapeConfigWithFileSD.RelabelConfigs[13].Replacement)
 	} else {
 		assert.Equal(t, relabel.LabelMap, scrapeConfigWithFileSD.RelabelConfigs[12].Action)
-		assert.Equal(t, prometheusreceiver.EscapedCaptureGroupOne, scrapeConfigWithFileSD.RelabelConfigs[12].Replacement)
+		assert.Equal(t, escapedCaptureGroupOne, scrapeConfigWithFileSD.RelabelConfigs[12].Replacement)
 	}
 }
 

@@ -1,0 +1,6 @@
+{
+  "name": "ralph-auditor",
+  "tools": ["read", "code", "grep", "glob", "thinking"],
+  "allowedTools": ["read", "code", "grep", "glob", "thinking"],
+  "resources": ["file://AGENTS.md"]
+}
