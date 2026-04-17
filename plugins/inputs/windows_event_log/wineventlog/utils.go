@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
@@ -27,11 +26,9 @@ const (
 	eventLogQueryTemplate    = `<QueryList><Query Id="0"><Select Path="%s">*[System[%s]]</Select></Query></QueryList>`
 	eventLogLevelFilter      = "Level='%s'"
 	eventLogeventIDFilter    = "EventID='%d'"
-	eventIgnoreOldFilter     = "TimeCreated[timediff(@SystemTime) &lt;= %d]"
 	eventRangeFilter         = "EventRecordID &gt; %d and EventRecordID &lt;= %d"
 	emptySpaceScanLength     = 100
 	UnknownBytesPerCharacter = 0
-	cutOffPeriod             = time.Hour * 24 * 14
 
 	CRITICAL    = "CRITICAL"
 	ERROR       = "ERROR"
@@ -98,10 +95,6 @@ func createWindowsEventFilter(path string, levels []string, eventIDs []int, addi
 		eventIDFilter = fmt.Sprintf("(%s)", strings.Join(formattedeventIDs, " or "))
 	}
 
-	// Ignore events older than 2 weeks
-	cutOffPeriod := (time.Hour * 24 * 14).Nanoseconds()
-	ignoreOlderThanTwoWeeksFilter := fmt.Sprintf(eventIgnoreOldFilter, cutOffPeriod/int64(time.Millisecond))
-
 	var filters []string
 	if levelsFilter != "" {
 		filters = append(filters, levelsFilter)
@@ -109,7 +102,6 @@ func createWindowsEventFilter(path string, levels []string, eventIDs []int, addi
 	if eventIDFilter != "" {
 		filters = append(filters, eventIDFilter)
 	}
-	filters = append(filters, ignoreOlderThanTwoWeeksFilter)
 	// Add any additional filters (e.g. record IDs)
 	if len(additionalFilters) > 0 {
 		filters = append(filters, strings.Join(additionalFilters, " and "))
